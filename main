@@ -1,0 +1,636 @@
+import tkinter as tk
+from tkinter import messagebox
+import sqlite3
+import calendar
+from datetime import date, datetime, timedelta
+
+import matplotlib
+matplotlib.use('TkAgg')
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+
+
+# -----------------------------
+# Colors
+# -----------------------------
+BG = "#F3EEFF"
+PANEL_BG = "#E9DDFF"
+ACCENT = "#FFDBF5"
+ACCENT_LIGHT = "#ede9fe"
+TEXT = "#B41DDA"
+MUTED = "#B41DDA"
+GOOD = "#8BFF47"
+BAD = "#FFAA99"
+TODAY = "#D47DFF"
+BUTTON_BG = "#E9DDFF"
+BUTTON_ACTIVE = "#ddd6fe"
+GRID_LINE = "#F3EEFF"
+
+DB_PATH = "mood_journal.db"
+APP_TITLE = "Mood Journal"
+MIN_MOOD = 1
+MAX_MOOD = 10
+
+
+class MoodJournalApp:
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        self.root.title(APP_TITLE)
+        self.root.geometry("1100x700")
+        self.root.configure(bg=BG)
+        self.root.minsize(980, 620)
+
+        today = date.today()
+        self.current_year = today.year
+        self.current_month = today.month
+        self.selected_date = today
+
+        self.conn = sqlite3.connect(DB_PATH)
+        self.conn.row_factory = sqlite3.Row
+        self.create_table()
+
+        self.day_buttons = {}
+
+        self.build_ui()
+        self.refresh_calendar()
+        self.refresh_chart()
+        self.update_stats()
+
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    # -----------------------------
+    # Database
+    # -----------------------------
+    def create_table(self):
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mood_entries (
+                entry_date TEXT PRIMARY KEY,
+                mood INTEGER NOT NULL,
+                note TEXT DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        self.conn.commit()
+
+    def save_entry(self, entry_date: str, mood: int, note: str):
+        self.conn.execute(
+            """
+            INSERT INTO mood_entries (entry_date, mood, note)
+            VALUES (?, ?, ?)
+            ON CONFLICT(entry_date) DO UPDATE SET
+                mood = excluded.mood,
+                note = excluded.note
+            """,
+            (entry_date, mood, note.strip()),
+        )
+        self.conn.commit()
+
+    def get_entry(self, entry_date: str):
+        cursor = self.conn.execute(
+            "SELECT entry_date, mood, note FROM mood_entries WHERE entry_date = ?",
+            (entry_date,),
+        )
+        return cursor.fetchone()
+
+    def get_entries_for_month(self, year: int, month: int):
+        start = date(year, month, 1).isoformat()
+        _, last_day = calendar.monthrange(year, month)
+        end = date(year, month, last_day).isoformat()
+        cursor = self.conn.execute(
+            """
+            SELECT entry_date, mood, note
+            FROM mood_entries
+            WHERE entry_date BETWEEN ? AND ?
+            ORDER BY entry_date
+            """,
+            (start, end),
+        )
+        return {row["entry_date"]: row for row in cursor.fetchall()}
+
+    def get_all_entries(self):
+        cursor = self.conn.execute(
+            "SELECT entry_date, mood, note FROM mood_entries ORDER BY entry_date"
+        )
+        return cursor.fetchall()
+
+    def get_average_between(self, start_date: date, end_date: date):
+        cursor = self.conn.execute(
+            """
+            SELECT AVG(mood) AS avg_mood, COUNT(*) AS entry_count
+            FROM mood_entries
+            WHERE entry_date BETWEEN ? AND ?
+            """,
+            (start_date.isoformat(), end_date.isoformat()),
+        )
+        row = cursor.fetchone()
+        return row["avg_mood"], row["entry_count"]
+
+    # -----------------------------
+    # UI
+    # -----------------------------
+    def build_ui(self):
+        title = tk.Label(
+            self.root,
+            text="Mood Journal",
+            bg=BG,
+            fg=TEXT,
+            font=("Segoe UI", 22, "bold"),
+        )
+        title.pack(anchor="w", padx=20, pady=(18, 8))
+
+        subtitle = tk.Label(
+            self.root,
+            text="Track your daily mood in SQLite and view the trend over time.",
+            bg=BG,
+            fg=MUTED,
+            font=("Segoe UI", 11),
+        )
+        subtitle.pack(anchor="w", padx=20, pady=(0, 12))
+
+        main = tk.Frame(self.root, bg=BG)
+        main.pack(fill="both", expand=True, padx=18, pady=(0, 18))
+        main.grid_columnconfigure(0, weight=0)
+        main.grid_columnconfigure(1, weight=1)
+        main.grid_rowconfigure(0, weight=1)
+
+        self.left_panel = tk.Frame(main, bg=PANEL_BG, bd=0, highlightthickness=1, highlightbackground=GRID_LINE)
+        self.left_panel.grid(row=0, column=0, sticky="nsw", padx=(0, 14))
+
+        self.right_panel = tk.Frame(main, bg=PANEL_BG, bd=0, highlightthickness=1, highlightbackground=GRID_LINE)
+        self.right_panel.grid(row=0, column=1, sticky="nsew")
+        self.right_panel.grid_rowconfigure(1, weight=1)
+        self.right_panel.grid_columnconfigure(0, weight=1)
+
+        self.build_calendar_panel()
+        self.build_chart_panel()
+
+    def build_calendar_panel(self):
+        header = tk.Frame(self.left_panel, bg=PANEL_BG)
+        header.pack(fill="x", padx=16, pady=(16, 10))
+
+        prev_btn = tk.Button(
+            header,
+            text="◀",
+            command=self.previous_month,
+            bg=BUTTON_BG,
+            activebackground=BUTTON_ACTIVE,
+            fg=TEXT,
+            relief="flat",
+            width=3,
+            font=("Segoe UI", 11, "bold"),
+            cursor="hand2",
+        )
+        prev_btn.pack(side="left")
+
+        self.month_label = tk.Label(
+            header,
+            text="",
+            bg=PANEL_BG,
+            fg=TEXT,
+            font=("Segoe UI", 14, "bold"),
+        )
+        self.month_label.pack(side="left", expand=True, padx=10)
+
+        next_btn = tk.Button(
+            header,
+            text="▶",
+            command=self.next_month,
+            bg=BUTTON_BG,
+            activebackground=BUTTON_ACTIVE,
+            fg=TEXT,
+            relief="flat",
+            width=3,
+            font=("Segoe UI", 11, "bold"),
+            cursor="hand2",
+        )
+        next_btn.pack(side="right")
+
+        legend = tk.Frame(self.left_panel, bg=PANEL_BG)
+        legend.pack(fill="x", padx=16, pady=(0, 12))
+
+        self.make_legend_item(legend, GOOD, "Logged day").pack(anchor="w")
+        self.make_legend_item(legend, TODAY, "Today").pack(anchor="w", pady=(6, 0))
+
+        days_frame = tk.Frame(self.left_panel, bg=PANEL_BG)
+        days_frame.pack(padx=16, pady=(0, 16))
+
+        weekday_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        for col, name in enumerate(weekday_names):
+            lbl = tk.Label(
+                days_frame,
+                text=name,
+                bg=PANEL_BG,
+                fg=TEXT,
+                width=4,
+                font=("Segoe UI", 10, "bold"),
+            )
+            lbl.grid(row=0, column=col, padx=2, pady=(0, 8))
+
+        self.calendar_grid = tk.Frame(days_frame, bg=PANEL_BG)
+        self.calendar_grid.grid(row=1, column=0, columnspan=7)
+
+        for row in range(6):
+            for col in range(7):
+                btn = tk.Button(
+                    self.calendar_grid,
+                    text="",
+                    width=4,
+                    height=2,
+                    relief="flat",
+                    bg=BUTTON_BG,
+                    activebackground=BUTTON_ACTIVE,
+                    fg=TEXT,
+                    font=("Segoe UI", 10),
+                    cursor="hand2",
+                    command=lambda r=row, c=col: self.on_day_button_click(r, c),
+                )
+                btn.grid(row=row, column=col, padx=2, pady=2, sticky="nsew")
+                self.day_buttons[(row, col)] = btn
+
+        hint = tk.Label(
+            self.left_panel,
+            text="Click a day to add or update your mood.",
+            bg=PANEL_BG,
+            fg=MUTED,
+            font=("Segoe UI", 10),
+            wraplength=250,
+            justify="left",
+        )
+        hint.pack(anchor="w", padx=16, pady=(0, 16))
+
+    def build_chart_panel(self):
+        top = tk.Frame(self.right_panel, bg=PANEL_BG, bd = 0)
+        top.grid(row=0, column=0,  sticky="ew", padx=16, pady=(16, 10))
+        top.grid_columnconfigure(0, weight=1)
+
+        title = tk.Label(
+            top,
+            text="Mood Trend",
+            bg=PANEL_BG,
+            fg=TEXT,
+            font=("Segoe UI", 16, "bold"),
+        )
+        title.grid(row=0, column=0, sticky="w")
+
+        self.stats_label = tk.Label(
+            top,
+            text="",
+            bg=PANEL_BG,
+            fg=GRID_LINE,
+            font=("Segoe UI", 10),
+            justify="right",
+        )
+        self.stats_label.grid(row=0, column=1, sticky="e")
+
+        cards = tk.Frame(top, bg=PANEL_BG)
+        cards.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        for col in range(3):
+            cards.grid_columnconfigure(col, weight=1)
+
+        self.week_avg_label = self.make_stat_card(cards, 0, "This week")
+        self.month_avg_label = self.make_stat_card(cards, 1, "This month")
+        self.total_avg_label = self.make_stat_card(cards, 2, "Overall")
+
+        self.figure = Figure(figsize=(7, 4.8), dpi=100)
+        self.ax = self.figure.add_subplot(111)
+        self.canvas = FigureCanvasTkAgg(self.figure, master=self.right_panel)
+        self.canvas.get_tk_widget().grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 16))
+
+    def make_legend_item(self, parent, color, text):
+        frame = tk.Frame(parent, bg=PANEL_BG)
+        swatch = tk.Label(frame, bg=color, width=2, height=1)
+        swatch.pack(side="left")
+        label = tk.Label(frame, text=f"  {text}", bg=PANEL_BG, fg=MUTED, font=("Segoe UI", 10))
+        label.pack(side="left")
+        return frame
+
+    def make_stat_card(self, parent, column: int, label_text: str):
+        card = tk.Frame(
+            parent,
+            bg=BG,
+            highlightthickness=1,
+            highlightbackground=GRID_LINE,
+            padx=12,
+            pady=10,
+        )
+        card.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 8, 0), pady=(0, 4))
+
+        label = tk.Label(
+            card,
+            text=label_text,
+            bg=BG,
+            fg=MUTED,
+            font=("Segoe UI", 10, "bold"),
+        )
+        label.pack(anchor="w")
+
+        value = tk.Label(
+            card,
+            text="--",
+            bg=BG,
+            fg=TEXT,
+            font=("Segoe UI", 16, "bold"),
+        )
+        value.pack(anchor="w", pady=(6, 0))
+        return value
+
+    # -----------------------------
+    # Calendar logic
+    # -----------------------------
+    def refresh_calendar(self):
+        self.month_label.config(
+            text=datetime(self.current_year, self.current_month, 1).strftime("%B %Y")
+        )
+
+        month_days = calendar.monthcalendar(self.current_year, self.current_month)
+        while len(month_days) < 6:
+            month_days.append([0] * 7)
+
+        entries = self.get_entries_for_month(self.current_year, self.current_month)
+        today = date.today()
+
+        for row in range(6):
+            for col in range(7):
+                day_num = month_days[row][col]
+                button = self.day_buttons[(row, col)]
+
+                if day_num == 0:
+                    button.config(text="", state="disabled", bg=PANEL_BG, activebackground=PANEL_BG)
+                    button.day_date = None
+                    continue
+
+                current_date = date(self.current_year, self.current_month, day_num)
+                iso_date = current_date.isoformat()
+                entry_exists = iso_date in entries
+
+                bg = BUTTON_BG
+                if current_date == today:
+                    bg = TODAY
+                elif entry_exists:
+                    bg = GOOD if entries[iso_date]["mood"] >= 6 else BAD
+
+                button.config(
+                    text=str(day_num),
+                    state="normal",
+                    bg=bg,
+                    activebackground=BUTTON_ACTIVE,
+                    fg=TEXT,
+                )
+                button.day_date = current_date
+
+    def on_day_button_click(self, row: int, col: int):
+        button = self.day_buttons[(row, col)]
+        if getattr(button, "day_date", None) is None:
+            return
+        self.selected_date = button.day_date
+        self.open_entry_popup(button.day_date)
+
+    def previous_month(self):
+        self.current_month -= 1
+        if self.current_month == 0:
+            self.current_month = 12
+            self.current_year -= 1
+        self.refresh_calendar()
+
+    def next_month(self):
+        self.current_month += 1
+        if self.current_month == 13:
+            self.current_month = 1
+            self.current_year += 1
+        self.refresh_calendar()
+
+    # -----------------------------
+    # Popup
+    # -----------------------------
+    def open_entry_popup(self, selected: date):
+        existing = self.get_entry(selected.isoformat())
+
+        popup = tk.Toplevel(self.root)
+        popup.title(f"Log mood - {selected.strftime('%b %d, %Y')}")
+        popup.configure(bg=PANEL_BG)
+        popup.resizable(False, False)
+        popup.transient(self.root)
+        popup.grab_set()
+
+        frame = tk.Frame(popup, bg=PANEL_BG)
+        frame.pack(fill="both", expand=True, padx=18, pady=18)
+
+        title = tk.Label(
+            frame,
+            text=selected.strftime("%A, %B %d, %Y"),
+            bg=PANEL_BG,
+            fg=TEXT,
+            font=("Segoe UI", 14, "bold"),
+        )
+        title.pack(anchor="w", pady=(0, 12))
+
+        mood_label = tk.Label(
+            frame,
+            text=f"Mood ({MIN_MOOD}-{MAX_MOOD})",
+            bg=PANEL_BG,
+            fg=TEXT,
+            font=("Segoe UI", 11, "bold"),
+        )
+        mood_label.pack(anchor="w")
+
+        mood_var = tk.IntVar(value=existing["mood"] if existing else 5)
+        mood_scale = tk.Scale(
+            frame,
+            from_=MIN_MOOD,
+            to=MAX_MOOD,
+            orient="horizontal",
+            resolution=1,
+            variable=mood_var,
+            bg=PANEL_BG,
+            fg=TEXT,
+            troughcolor=ACCENT_LIGHT,
+            highlightthickness=0,
+            length=280,
+        )
+        mood_scale.pack(anchor="w", pady=(4, 12))
+
+        note_label = tk.Label(
+            frame,
+            text="Optional note",
+            bg=PANEL_BG,
+            fg=TEXT,
+            font=("Segoe UI", 11, "bold"),
+        )
+        note_label.pack(anchor="w")
+
+        note_text = tk.Text(
+            frame,
+            width=40,
+            height=6,
+            bg=BG,
+            fg=TEXT,
+            relief="flat",
+            font=("Segoe UI", 10),
+            wrap="word",
+            insertbackground=TEXT,
+        )
+        note_text.pack(fill="both", expand=True, pady=(4, 14))
+
+        if existing and existing["note"]:
+            note_text.insert("1.0", existing["note"])
+
+        buttons = tk.Frame(frame, bg=PANEL_BG)
+        buttons.pack(fill="x")
+
+        def submit():
+            mood = mood_var.get()
+            note = note_text.get("1.0", "end").strip()
+            self.save_entry(selected.isoformat(), mood, note)
+            popup.destroy()
+            self.refresh_calendar()
+            self.refresh_chart()
+            self.update_stats()
+
+        save_btn = tk.Button(
+            buttons,
+            text="Save Entry",
+            command=submit,
+            bg=ACCENT,
+            activebackground=ACCENT,
+            fg="white",
+            relief="flat",
+            padx=14,
+            pady=8,
+            cursor="hand2",
+            font=("Segoe UI", 10, "bold"),
+        )
+        save_btn.pack(side="left")
+
+        cancel_btn = tk.Button(
+            buttons,
+            text="Cancel",
+            command=popup.destroy,
+            bg=BUTTON_BG,
+            activebackground=BUTTON_ACTIVE,
+            fg=TEXT,
+            relief="flat",
+            padx=14,
+            pady=8,
+            cursor="hand2",
+            font=("Segoe UI", 10),
+        )
+        cancel_btn.pack(side="left", padx=(8, 0))
+
+        self.center_window(popup, 390, 330)
+        popup.focus_force()
+
+    def center_window(self, window: tk.Toplevel, width: int, height: int):
+        self.root.update_idletasks()
+        root_x = self.root.winfo_x()
+        root_y = self.root.winfo_y()
+        root_w = self.root.winfo_width()
+        root_h = self.root.winfo_height()
+
+        x = root_x + (root_w // 2) - (width // 2)
+        y = root_y + (root_h // 2) - (height // 2)
+        window.geometry(f"{width}x{height}+{x}+{y}")
+
+    # -----------------------------
+    # Chart + stats
+    # -----------------------------
+    def refresh_chart(self):
+        entries = self.get_all_entries()
+
+        self.ax.clear()
+        self.ax.set_facecolor("white")
+        self.figure.patch.set_facecolor(PANEL_BG)
+
+        if not entries:
+            self.ax.text(
+                0.5,
+                0.5,
+                "No entries yet. Click a day on the calendar to log your first mood.",
+                ha="center",
+                va="center",
+                fontsize=12,
+                color=MUTED,
+                transform=self.ax.transAxes,
+            )
+            self.ax.set_xticks([])
+            self.ax.set_yticks([])
+            for spine in self.ax.spines.values():
+                spine.set_visible(False)
+            self.canvas.draw()
+            return
+
+        dates = [datetime.strptime(row["entry_date"], "%Y-%m-%d").date() for row in entries]
+        moods = [row["mood"] for row in entries]
+        labels = [d.strftime("%b %d") for d in dates]
+
+        self.ax.plot(labels, moods, color = TEXT, marker="o", linewidth=2)
+        self.ax.set_ylim(MIN_MOOD - 0.2, MAX_MOOD + 0.2)
+        self.ax.set_ylabel("Mood", color = TEXT)
+        self.ax.set_xlabel("Date", color = TEXT)
+        self.ax.set_title("Mood over time", fontsize=13, color=TEXT, pad=12)
+        self.ax.grid(True, alpha=0.3)
+
+        if len(labels) > 8:
+            step = max(1, len(labels) // 8)
+            tick_positions = list(range(0, len(labels), step))
+            self.ax.set_xticks(tick_positions)
+            self.ax.set_xticklabels([labels[i] for i in tick_positions], rotation=30, ha="right")
+        else:
+            self.ax.set_xticks(range(len(labels)))
+            self.ax.set_xticklabels(labels, rotation=30, ha="right")
+
+        self.figure.tight_layout()
+        self.canvas.draw()
+
+    def update_stats(self):
+        entries = self.get_all_entries()
+        if not entries:
+            self.week_avg_label.config(text="--")
+            self.month_avg_label.config(text="--")
+            self.total_avg_label.config(text="--")
+            self.stats_label.config(text="0 entries")
+            return
+
+        today = date.today()
+        week_start = today - timedelta(days=today.weekday())
+        week_end = week_start + timedelta(days=6)
+        month_start = today.replace(day=1)
+        _, month_last_day = calendar.monthrange(today.year, today.month)
+        month_end = today.replace(day=month_last_day)
+
+        week_avg, week_count = self.get_average_between(week_start, week_end)
+        month_avg, month_count = self.get_average_between(month_start, month_end)
+
+        moods = [row["mood"] for row in entries]
+        total_average = sum(moods) / len(moods)
+        latest = entries[-1]
+        latest_date = datetime.strptime(latest["entry_date"], "%Y-%m-%d").strftime("%b %d, %Y")
+
+        self.week_avg_label.config(text=f"{week_avg:.1f}" if week_count else "--")
+        self.month_avg_label.config(text=f"{month_avg:.1f}" if month_count else "--")
+        self.total_avg_label.config(text=f"{total_average:.1f}")
+
+        self.stats_label.config(
+            text=(
+                f"Entries: {len(entries)}    "
+                f"Week: {week_count}    Month: {month_count}    Latest: {latest_date}"
+            )
+        )
+
+    # -----------------------------
+    # Cleanup
+    # -----------------------------
+    def on_close(self):
+        self.conn.close()
+        self.root.destroy()
+
+
+def main():
+    root = tk.Tk()
+    app = MoodJournalApp(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
