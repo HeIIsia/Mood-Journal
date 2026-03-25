@@ -15,16 +15,20 @@ from matplotlib.figure import Figure
 # -----------------------------
 BG = "#F3EEFF"
 PANEL_BG = "#E9DDFF"
-ACCENT = "#FFDBF5"
-ACCENT_LIGHT = "#ede9fe"
 TEXT = "#B41DDA"
-MUTED = "#B41DDA"
-GOOD = "#8BFF47"
-BAD = "#FFAA99"
-TODAY = "#D47DFF"
+ACCENT = TEXT
+ACCENT_LIGHT = "#F3EEFF"
+
+TEXT_TODAY = "#000000"
+MUTED = "#B35FBF"
+GOOD = "#BFFAAD"
+NEUTRAL = "#F2FAB2"
+BAD = "#FAB9B7"
+TODAY = "#E8ADFA"
+TODAY2 = "#FFFFFF"
 BUTTON_BG = "#E9DDFF"
 BUTTON_ACTIVE = "#ddd6fe"
-GRID_LINE = "#F3EEFF"
+GRID_LINE = "#E594FA"
 
 DB_PATH = "mood_journal.db"
 APP_TITLE = "Mood Journal"
@@ -155,16 +159,31 @@ class MoodJournalApp:
         main.grid_columnconfigure(1, weight=1)
         main.grid_rowconfigure(0, weight=1)
 
-        self.left_panel = tk.Frame(main, bg=PANEL_BG, bd=0, highlightthickness=1, highlightbackground=GRID_LINE)
+        # Left side: calendar
+        self.left_panel = tk.Frame(
+            main,
+            bg=PANEL_BG,
+            bd=0,
+            highlightthickness=0,
+            highlightbackground=GRID_LINE,
+        )
         self.left_panel.grid(row=0, column=0, sticky="nsw", padx=(0, 14))
 
-        self.right_panel = tk.Frame(main, bg=PANEL_BG, bd=0, highlightthickness=1, highlightbackground=GRID_LINE)
+        # Right side: stats + chart
+        self.right_panel = tk.Frame(
+            main,
+            bg=PANEL_BG,
+            bd=0,
+            highlightthickness=0,
+            relief="flat",
+        )
         self.right_panel.grid(row=0, column=1, sticky="nsew")
         self.right_panel.grid_rowconfigure(1, weight=1)
         self.right_panel.grid_columnconfigure(0, weight=1)
 
         self.build_calendar_panel()
         self.build_chart_panel()
+
 
     def build_calendar_panel(self):
         header = tk.Frame(self.left_panel, bg=PANEL_BG)
@@ -261,8 +280,8 @@ class MoodJournalApp:
         hint.pack(anchor="w", padx=16, pady=(0, 16))
 
     def build_chart_panel(self):
-        top = tk.Frame(self.right_panel, bg=PANEL_BG, bd = 0)
-        top.grid(row=0, column=0,  sticky="ew", padx=16, pady=(16, 10))
+        top = tk.Frame(self.right_panel, bg=PANEL_BG, bd=0)
+        top.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 10))
         top.grid_columnconfigure(0, weight=1)
 
         title = tk.Label(
@@ -295,8 +314,14 @@ class MoodJournalApp:
 
         self.figure = Figure(figsize=(7, 4.8), dpi=100)
         self.ax = self.figure.add_subplot(111)
+
         self.canvas = FigureCanvasTkAgg(self.figure, master=self.right_panel)
-        self.canvas.get_tk_widget().grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 16))
+        canvas_widget = self.canvas.get_tk_widget()
+
+        # Remove the default Tk border around the matplotlib widget
+        canvas_widget.config(bg=PANEL_BG, highlightthickness=0, bd=0, relief="flat")
+        canvas_widget.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 16))
+
 
     def make_legend_item(self, parent, color, text):
         frame = tk.Frame(parent, bg=PANEL_BG)
@@ -368,8 +393,14 @@ class MoodJournalApp:
                 bg = BUTTON_BG
                 if current_date == today:
                     bg = TODAY
+                    text = TODAY2
                 elif entry_exists:
-                    bg = GOOD if entries[iso_date]["mood"] >= 6 else BAD
+                    if entries[iso_date]["mood"] >= 6:
+                        bg = GOOD
+                    elif entries[iso_date]["mood"] == 5:
+                        bg = NEUTRAL
+                    else:
+                        bg = BAD
 
                 button.config(
                     text=str(day_num),
@@ -542,6 +573,90 @@ class MoodJournalApp:
         self.ax.set_facecolor("white")
         self.figure.patch.set_facecolor(PANEL_BG)
 
+        # Keep the chart clean and soft-looking
+        for spine in self.ax.spines.values():
+            spine.set_visible(False)
+
+        self.ax.grid(False)
+        self.ax.tick_params(axis="x", colors=MUTED)
+        self.ax.tick_params(axis="y", colors=MUTED)
+
+        if not entries:
+            self.ax.text(
+                0.5,
+                0.5,
+                "No entries yet. Click a day on the calendar to log your first mood.",
+                ha="center",
+                va="center",
+                fontsize=12,
+                color=MUTED,
+                transform=self.ax.transAxes,
+            )
+            self.ax.set_xticks([])
+            self.ax.set_yticks([])
+            self.canvas.draw()
+            return
+
+        dates = [datetime.strptime(row["entry_date"], "%Y-%m-%d").date() for row in entries]
+        moods = [row["mood"] for row in entries]
+        labels = [d.strftime("%b %d") for d in dates]
+
+        self.ax.plot(labels, moods, color=TEXT, marker="o", linewidth=2)
+        self.ax.set_ylim(MIN_MOOD - 0.2, MAX_MOOD + 0.2)
+        self.ax.set_ylabel("Mood", color=MUTED)
+        self.ax.set_xlabel("Date", color=MUTED)
+        self.ax.set_title("Mood over time", fontsize=13, color=TEXT, pad=12)
+
+        # Show fewer x labels when the list gets long
+        if len(labels) > 8:
+            step = max(1, len(labels) // 8)
+            tick_positions = list(range(0, len(labels), step))
+            self.ax.set_xticks(tick_positions)
+            self.ax.set_xticklabels(
+                [labels[i] for i in tick_positions],
+                rotation=30,
+                ha="right",
+                color=MUTED,
+            )
+        else:
+            self.ax.set_xticks(range(len(labels)))
+            self.ax.set_xticklabels(labels, rotation=30, ha="right", color=MUTED)
+
+        self.figure.tight_layout()
+        self.canvas.draw()
+
+        dates = [datetime.strptime(row["entry_date"], "%Y-%m-%d").date() for row in entries]
+        moods = [row["mood"] for row in entries]
+        labels = [d.strftime("%b %d") for d in dates]
+
+        self.ax.plot(labels, moods, color=TEXT, marker="o", linewidth=2)
+        self.ax.set_ylim(MIN_MOOD - 0.2, MAX_MOOD + 0.2)
+
+        # make axis labels MUTED instead of black / TEXT
+        self.ax.set_ylabel("Mood", color=MUTED)
+        self.ax.set_xlabel("Date", color=MUTED)
+        self.ax.set_title("Mood over time", fontsize=13, color=TEXT, pad=12)
+
+        if len(labels) > 8:
+            step = max(1, len(labels) // 8)
+            tick_positions = list(range(0, len(labels), step))
+            self.ax.set_xticks(tick_positions)
+            self.ax.set_xticklabels(
+                [labels[i] for i in tick_positions],
+                rotation=30,
+                ha="right",
+                color=MUTED,
+            )
+        else:
+            self.ax.set_xticks(range(len(labels)))
+            self.ax.set_xticklabels(labels, rotation=30, ha="right", color=MUTED)
+
+        self.figure.tight_layout()
+        self.canvas.draw()
+        "return"
+        self.ax.set_facecolor("white")
+        self.figure.patch.set_facecolor(PANEL_BG)
+
         if not entries:
             self.ax.text(
                 0.5,
@@ -559,6 +674,7 @@ class MoodJournalApp:
                 spine.set_visible(False)
             self.canvas.draw()
             return
+
 
         dates = [datetime.strptime(row["entry_date"], "%Y-%m-%d").date() for row in entries]
         moods = [row["mood"] for row in entries]
